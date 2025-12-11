@@ -48,3 +48,4 @@ bank.db
 # IDE
 .vscode/
 .idea/
+.cursor/
