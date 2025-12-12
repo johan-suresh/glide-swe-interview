@@ -4,15 +4,11 @@ import * as schema from "./schema";
 
 const dbPath = "bank.db";
 
+// Fix for PERF-408: Single database connection used by drizzle
 const sqlite = new Database(dbPath);
 export const db = drizzle(sqlite, { schema });
 
-const connections: Database.Database[] = [];
-
 export function initDb() {
-  const conn = new Database(dbPath);
-  connections.push(conn);
-
   // Create tables if they don't exist
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -64,3 +60,5 @@ export function initDb() {
 
 // Initialize database on import
 initDb();
+
+

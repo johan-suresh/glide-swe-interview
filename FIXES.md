@@ -305,3 +305,403 @@ To avoid similar issues in the future:
 6. **Code Review Guidelines**: Establish guidelines that prohibit fallback objects for critical database operations, especially those involving financial data.
 
 ---
+
+### PERF-404: Transaction Sorting
+
+**Priority:** Medium  
+**Reporter:** Jane Doe  
+**File:** `server/routers/account.ts`
+
+#### What Caused the Bug
+
+The `getTransactions` query did not include an `orderBy` clause, causing transactions to be returned in an undefined order (typically insertion order, but not guaranteed). This resulted in transaction history appearing random or inconsistent to users.
+
+**Vulnerable Code (lines 163-166):**
+
+```typescript
+const accountTransactions = await db
+  .select()
+  .from(transactions)
+  .where(eq(transactions.accountId, input.accountId));
+```
+
+Without explicit ordering, the database returns rows in whatever order it finds most efficient, which can vary based on:
+- Database internal optimizations
+- Index usage
+- Data fragmentation
+- Concurrent operations
+
+#### How the Fix Resolves It
+
+The fix adds an `orderBy` clause with descending order on `createdAt`, ensuring transactions are always sorted with the newest first.
+
+**Fixed Code (lines 164-168):**
+
+```typescript
+// Fix for PERF-404: Sort transactions by creation date (newest first)
+const accountTransactions = await db
+  .select()
+  .from(transactions)
+  .where(eq(transactions.accountId, input.accountId))
+  .orderBy(desc(transactions.createdAt));
+```
+
+This ensures:
+- Transactions are consistently ordered by creation date
+- Newest transactions appear first (most relevant for users)
+- The order is deterministic and predictable
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Always Specify Order**: Any query returning multiple rows that will be displayed to users should have an explicit `orderBy` clause.
+
+2. **Code Review Checklist**: Include "Is ordering specified?" as a review item for all list/collection queries.
+
+3. **Default Ordering Convention**: Establish a convention that all list endpoints return data in a predictable order (e.g., newest first, alphabetical, etc.).
+
+4. **Database Indexes**: Ensure appropriate indexes exist on columns used for ordering to maintain performance.
+
+5. **API Documentation**: Document the expected order of returned data in API specifications.
+
+---
+
+### PERF-406: Balance Calculation
+
+**Priority:** Critical  
+**Reporter:** Finance Team  
+**File:** `server/routers/account.ts`
+
+#### What Caused the Bug
+
+The `fundAccount` function used a faulty loop to calculate the new balance, which introduced floating-point precision errors. Instead of simply adding the amount to the balance, the code divided the amount by 100 and added it 100 times, causing cumulative precision errors.
+
+**Vulnerable Code (lines 131-138):**
+
+```typescript
+let finalBalance = account.balance;
+for (let i = 0; i < 100; i++) {
+  finalBalance = finalBalance + amount / 100;
+}
+
+return {
+  transaction,
+  newBalance: finalBalance, // This will be slightly off due to float precision
+};
+```
+
+The issues:
+1. **Floating-Point Accumulation**: Each addition of `amount / 100` introduces small precision errors (e.g., adding 0.01 one hundred times does not equal exactly 1.0 in floating-point arithmetic)
+2. **Mismatch with Database**: The database was updated correctly with `account.balance + amount`, but the returned `newBalance` used the faulty calculation, causing users to see incorrect balances
+3. **Cumulative Errors**: After many transactions, these small errors accumulate into noticeable discrepancies
+
+#### How to Reproduce the Bug
+
+1. **Before the fix:**
+   - Made many small transactions on an account
+   - After multiple transactions, the returned `newBalance` values showed floating-point errors (e.g., `100.00000000000001` instead of `100.00`)
+   - The errors accumulated with each transaction, causing noticeable discrepancies over time
+
+2. **After the fix:**
+   - Made the same number of transactions as before
+   - Verified that no floating-point errors occurred
+   - The returned `newBalance` values were accurate and matched the expected amounts exactly
+
+#### How the Fix Resolves It
+
+The fix removes the faulty loop and calculates the balance correctly in a single operation.
+
+**Fixed Code (lines 123-131):**
+
+```typescript
+// Fix for PERF-406: Calculate balance correctly without floating-point precision errors
+const newBalance = account.balance + amount;
+await db
+  .update(accounts)
+  .set({ balance: newBalance })
+  .where(eq(accounts.id, input.accountId));
+
+return {
+  transaction,
+  newBalance,
+};
+```
+
+This ensures:
+- The balance is calculated once, correctly
+- The returned balance matches exactly what was stored in the database
+- No floating-point precision errors accumulate over time
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Avoid Unnecessary Loops for Arithmetic**: Never use loops for simple arithmetic operations that can be done in a single calculation.
+
+2. **Use Decimal Libraries for Financial Calculations**: Consider using libraries like `decimal.js` or `big.js` for precise financial calculations if floating-point precision becomes an issue.
+
+3. **Consistency Between Database and API Response**: Always ensure that values returned to the client match exactly what is stored in the database.
+
+4. **Code Review for Financial Logic**: Require extra scrutiny for any code that handles monetary calculations.
+
+5. **Remove Debug/Test Code**: The loop appears to be intentionally wrong (the comment acknowledges it). Ensure such code never makes it to production.
+
+---
+
+### PERF-405: Missing Transactions
+
+**Priority:** Critical  
+**Reporter:** Multiple Users  
+**File:** `server/routers/account.ts`
+
+#### What Caused the Bug
+
+After creating a transaction in the `fundAccount` function, the code attempted to fetch "the created transaction" but used a query that returned the wrong transaction entirely.
+
+**Vulnerable Code (line 121):**
+
+```typescript
+// Fetch the created transaction
+const transaction = await db.select().from(transactions).orderBy(transactions.createdAt).limit(1).get();
+```
+
+The issues with this query:
+1. **No WHERE clause**: Queries ALL transactions across ALL accounts, not just the current account
+2. **Ascending order**: `orderBy(transactions.createdAt)` without `desc()` sorts oldest-first
+3. **limit(1)**: Returns only one row
+
+**Result**: This query ALWAYS returned the oldest transaction in the entire database (e.g., `id: 1, amount: $12`), regardless of what transaction was just created.
+
+#### How to Reproduce the Bug
+
+1. **Before the fix:**
+   - Created multiple funding transactions for different amounts ($456, $789, etc.)
+   - Added logging to see what transaction was returned
+   - **Console output for $123 funding:**
+     ```
+     transaction: {
+       id: 1,
+       accountId: 6,
+       type: 'deposit',
+       amount: 12,
+       description: 'Funding from card',
+       ...
+     }
+     ```
+   - The response showed `id: 1, amount: $12` even though we funded $123
+   - This caused confusion as the API returned incorrect transaction details after funding
+
+2. **After the fix:**
+   - Created funding transactions for $456 and $789
+   - **Console output:**
+     ```
+     transaction: { id: 39, amount: 456, ... }
+     transaction: { id: 40, amount: 789, ... }
+     ```
+   - Each funding event now returns the correct newly-created transaction
+
+#### How the Fix Resolves It
+
+The fix adds proper filtering and ordering to fetch the correct transaction.
+
+**Fixed Code (lines 121-131):**
+
+```typescript
+
+// Get the most recently created transaction for this specific account
+const transaction = await db
+  .select()
+  .from(transactions)
+  .where(eq(transactions.accountId, input.accountId))
+  .orderBy(desc(transactions.createdAt))
+  .limit(1)
+  .get();
+```
+
+**Key differences:**
+
+| Aspect | Old Query | Fixed Query |
+|--------|-----------|-------------|
+| Scope | ALL transactions in database | Only THIS account's transactions |
+| Order | Ascending (oldest first) | Descending (newest first) |
+| Result | Always returns oldest transaction | Returns the just-created transaction |
+
+This ensures:
+- Users see the correct transaction details immediately after funding
+- The transaction ID and amount match what was just created
+- No confusion about "missing" or incorrect transactions
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Always Filter by Context**: When fetching related data, always include appropriate WHERE clauses to filter by the relevant context (accountId, userId, etc.).
+
+2. **Specify Sort Direction Explicitly**: Always use `desc()` or `asc()` explicitly to make sort order clear and intentional.
+
+3. **Verify Query Results**: Add logging during development to verify queries return expected data.
+
+4. **Code Review for Query Logic**: Review all database queries to ensure they fetch the intended data, not unrelated records.
+
+5. **Test with Multiple Records**: Test queries with multiple existing records to catch issues where wrong records are returned.
+
+---
+
+### PERF-407: Performance Degradation
+
+**Priority:** High  
+**Reporter:** DevOps  
+**File:** `server/routers/account.ts`
+
+#### What Caused the Bug
+
+The `getTransactions` function had a classic **N+1 query problem**. For each transaction, it made a separate database query to fetch account details, even though all transactions belonged to the same account which was already fetched earlier.
+
+**Vulnerable Code (lines 176-183):**
+
+```typescript
+const enrichedTransactions = [];
+for (const transaction of accountTransactions) {
+  // THIS QUERY RUNS FOR EVERY TRANSACTION - N+1 problem!
+  const accountDetails = await db.select().from(accounts).where(eq(accounts.id, transaction.accountId)).get();
+
+  enrichedTransactions.push({
+    ...transaction,
+    accountType: accountDetails?.accountType,
+  });
+}
+```
+
+**The problems:**
+1. **Redundant queries**: All transactions are for the same account, yet we query that account N times
+2. **Already have the data**: The `account` object was fetched earlier in the verification step
+3. **Linear degradation**: 100 transactions = 100 extra database queries
+4. **Peak usage issues**: Multiple users hitting this endpoint simultaneously compounds the problem
+
+**Performance impact:**
+- Each query has overhead (~5-20ms for connection, parsing, execution)
+- 100 transactions × 10ms = 1 second of unnecessary database time
+- Under load: database connection exhaustion, timeouts, system slowdown
+
+#### How the Fix Resolves It
+
+The fix uses the `account` object already fetched during verification instead of querying in a loop.
+
+**Fixed Code:**
+
+```typescript
+// Fix for PERF-407: Use the account we already fetched instead of N+1 queries
+// Previously, this loop queried the database for EACH transaction (N+1 problem)
+const enrichedTransactions = accountTransactions.map(transaction => ({
+  ...transaction,
+  accountType: account.accountType,
+}));
+```
+
+**Performance improvement:**
+- **Before**: 1 + N database queries (1 for transactions + N for account lookups)
+- **After**: 1 database query total (just for transactions)
+- Eliminates O(N) database calls, making response time constant regardless of transaction count
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Identify N+1 Patterns**: Look for database queries inside loops - this is almost always a performance problem.
+
+2. **Reuse Fetched Data**: If you've already queried data, store it and reuse it instead of querying again.
+
+3. **Use Query Logging**: Enable database query logging during development to spot excessive queries.
+
+4. **Load Testing**: Test endpoints with realistic data volumes to catch performance issues before production.
+
+5. **Use JOINs or Batch Queries**: When you need related data, use JOINs or batch queries (e.g., `WHERE id IN (...)`) instead of individual queries.
+
+6. **Code Review for Loops**: Any loop that contains a database query should be flagged for review.
+
+---
+
+### PERF-408: Resource Leak
+
+**Priority:** Critical  
+**Reporter:** System Monitoring  
+**File:** `lib/db/index.ts`
+
+#### What Caused the Bug
+
+The database initialization code created two database connections, but only one was actually used. The second connection was stored in an array but never used or closed, wasting system resources.
+
+**Vulnerable Code:**
+
+```typescript
+const sqlite = new Database(dbPath);           // Connection 1: Used by drizzle ✓
+export const db = drizzle(sqlite, { schema });
+
+const connections: Database.Database[] = [];   // Unused array
+
+export function initDb() {
+  const conn = new Database(dbPath);           // Connection 2: Created but NEVER USED ✗
+  connections.push(conn);                      // Stored but never used or closed
+  
+  sqlite.exec(`...`);                          // Uses sqlite, not conn!
+}
+```
+
+**The problems:**
+1. **Unused connection**: `conn` is created but never used - only `sqlite` is used for all operations
+2. **Wasted resources**: Each database connection consumes memory and file handles
+3. **Unused array**: `connections` array stores references but serves no purpose
+4. **Potential accumulation**: In serverless/scaling environments, orphaned connections could accumulate
+
+#### How to Reproduce the Bug
+
+Added logging to show both connections being created:
+
+```
+🟢 Connection 1 (sqlite): Created - THIS ONE IS USED
+🔴 Connection 2 (conn): Created but NEVER USED - WASTED RESOURCE!
+```
+
+This confirmed that two connections were created on startup, but only one was actually used by drizzle for database operations.
+
+#### How the Fix Resolves It
+
+The fix removes the unused connection and array, keeping only the single connection used by drizzle.
+
+**Fixed Code:**
+
+```typescript
+const dbPath = "bank.db";
+
+// Fix for PERF-408: Single database connection used by drizzle
+const sqlite = new Database(dbPath);
+export const db = drizzle(sqlite, { schema });
+
+export function initDb() {
+  // Create tables if they don't exist
+  sqlite.exec(`...`);
+}
+
+// Initialize database on import
+initDb();
+```
+
+This ensures:
+- Only one database connection is created
+- No wasted resources from unused connections
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Review Resource Creation**: Any code that creates connections, file handles, or other resources should be reviewed to ensure they're actually used.
+
+2. **Remove Dead Code**: Unused variables, arrays, and connections should be removed, not left in the codebase.
+
+3. **Single Connection Pattern**: For SQLite and similar embedded databases, use a single connection instance rather than creating multiple.
+
+4. **Resource Monitoring**: Use monitoring tools to track open connections and file handles in production.
+
+
+---
