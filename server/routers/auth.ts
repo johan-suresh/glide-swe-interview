@@ -11,7 +11,15 @@ export const authRouter = router({
   signup: publicProcedure
     .input(
       z.object({
-        email: z.string().email().toLowerCase(),
+        // Fix for VAL-201: Enhanced email validation with valid TLD check
+        email: z.string()
+          .email("Invalid email address")
+          .toLowerCase()
+          .refine((email) => {
+            // Check for valid top-level domains
+            const validTLDs = [".com", ".org", ".net", ".edu", ".gov", ".mil", ".co", ".io", ".dev", ".app", ".me", ".info", ".biz", ".us", ".uk", ".ca", ".au", ".de", ".fr", ".jp", ".cn", ".in", ".br", ".mx", ".es", ".it", ".nl", ".se", ".no", ".fi", ".dk", ".pl", ".ru", ".ch", ".at", ".be", ".nz", ".ie", ".sg", ".hk", ".kr", ".tw", ".za"];
+            return validTLDs.some(tld => email.endsWith(tld));
+          }, "Please use a valid email domain (e.g., .com, .org, .edu)"),
         // Fix for VAL-208: Strong password requirements
         password: z.string()
           .min(8, "Password must be at least 8 characters")
@@ -50,7 +58,11 @@ export const authRouter = router({
         ssn: z.string().regex(/^\d{9}$/),
         address: z.string().min(1),
         city: z.string().min(1),
-        state: z.string().length(2).toUpperCase(),
+        // Fix for VAL-203: Validate actual US state codes
+        state: z.string().length(2).toUpperCase().refine((val) => {
+          const validStates = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR", "VI", "GU", "AS", "MP"];
+          return validStates.includes(val);
+        }, "Invalid US state code"),
         zipCode: z.string().regex(/^\d{5}$/),
       })
     )

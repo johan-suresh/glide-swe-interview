@@ -85,8 +85,16 @@ export default function SignupPage() {
                   {...register("email", {
                     required: "Email is required",
                     pattern: {
-                      value: /^\S+@\S+$/i,
+                      value: /^\S+@\S+\.\S+$/i,
                       message: "Invalid email address",
+                    },
+                    validate: {
+                      // Fix for VAL-201: Check for valid TLDs
+                      validTLD: (value) => {
+                        const validTLDs = [".com", ".org", ".net", ".edu", ".gov", ".mil", ".co", ".io", ".dev", ".app", ".me", ".info", ".biz", ".us", ".uk", ".ca", ".au", ".de", ".fr", ".jp", ".cn", ".in", ".br", ".mx", ".es", ".it", ".nl", ".se", ".no", ".fi", ".dk", ".pl", ".ru", ".ch", ".at", ".be", ".nz", ".ie", ".sg", ".hk", ".kr", ".tw", ".za"];
+                        const hasValidTLD = validTLDs.some(tld => value.toLowerCase().endsWith(tld));
+                        return hasValidTLD || "Please use a valid email domain (e.g., .com, .org, .edu)";
+                      },
                     },
                   })}
                   type="email"
@@ -277,8 +285,15 @@ export default function SignupPage() {
                     {...register("state", {
                       required: "State is required",
                       pattern: {
-                        value: /^[A-Z]{2}$/,
+                        value: /^[A-Za-z]{2}$/,
                         message: "Use 2-letter state code",
+                      },
+                      validate: {
+                        // Fix for VAL-203: Validate actual US state codes
+                        validState: (value) => {
+                          const validStates = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR", "VI", "GU", "AS", "MP"];
+                          return validStates.includes(value.toUpperCase()) || "Invalid US state code";
+                        },
                       },
                     })}
                     type="text"

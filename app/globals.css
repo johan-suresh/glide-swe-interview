@@ -24,3 +24,15 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Fix for UI-101: Ensure input text is visible in dark mode */
+input,
+textarea,
+select {
+  color: #171717; /* Dark text on light input backgrounds */
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #6b7280; /* Gray placeholder text */
+}

@@ -4,6 +4,69 @@ This document tracks all bug fixes implemented for the SecureBank application, o
 
 ---
 
+## UI Issues
+
+### UI-101: Dark Mode Text Visibility
+
+**Priority:** Medium  
+**Reporter:** Sarah Chen  
+**File:** `app/globals.css`
+
+#### What Caused the Bug
+
+When dark mode is enabled (via system preferences), the CSS sets the body text color to light (`#ededed`). However, form input elements retain white backgrounds, causing the inherited light text color to be invisible against the white input background.
+
+**Root Cause:**
+
+```css
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground: #ededed; /* Light text for dark mode */
+  }
+}
+
+body {
+  color: var(--foreground); /* Inputs inherit this light color */
+}
+```
+
+Input elements inherit the light foreground color but have white backgrounds, making text invisible.
+
+#### How the Fix Resolves It
+
+Added explicit text color styles for form elements in `globals.css`:
+
+**Fixed Code:**
+
+```css
+/* Fix for UI-101: Ensure input text is visible in dark mode */
+input,
+textarea,
+select {
+  color: #171717; /* Dark text on light input backgrounds */
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #6b7280; /* Gray placeholder text */
+}
+```
+
+This ensures:
+- Input text is always dark (visible on white backgrounds)
+- Placeholder text is gray and visible
+- Works regardless of system color scheme
+
+#### Preventative Measures
+
+1. **Explicit Form Styling**: Always explicitly set text colors for form elements rather than relying on inheritance.
+
+2. **Test Both Color Schemes**: Include dark mode testing in QA processes.
+
+3. **Use CSS Variables Consistently**: If using CSS variables for theming, ensure form elements also use appropriate variables.
+
+---
+
 ## Security Issues
 
 ### SEC-301: SSN Storage in Plaintext
@@ -94,10 +157,6 @@ To avoid similar issues in the future:
 
 1. **Security Review Checklist**: Create a security review checklist that includes verifying all sensitive PII fields (SSN, credit card numbers, bank account numbers, etc.) are properly hashed or encrypted before database insertion.
 
-2. **Type Safety with Sensitive Fields**: Consider creating a TypeScript type or utility function that marks sensitive fields, making it impossible to accidentally insert them without hashing:
-   ```typescript
-   type SensitiveField<T> = T & { __sensitive: true };
-   ```
 
 3. **Code Review Guidelines**: Establish code review guidelines that require explicit review of any database insert operations involving PII or sensitive data.
 
@@ -231,7 +290,7 @@ To avoid similar issues in the future:
 
 **Priority:** High  
 **Reporter:** DevOps Team  
-**File:** `server/routers/auth.ts`
+**Files:** `server/routers/auth.ts`, `lib/trpc/Provider.tsx`
 
 #### What Caused the Bug
 
@@ -274,6 +333,26 @@ This ensures:
 - Logging in from a new device automatically logs out from all other devices
 - If credentials are compromised, user can regain exclusive access by logging in again
 
+**Frontend Fix (lib/trpc/Provider.tsx):**
+
+Added global error handling to redirect users to login when their session becomes invalid:
+
+```typescript
+fetch(url, options).then(async (response) => {
+  // Check for 401 and redirect to login
+  if (response.status === 401 && typeof window !== "undefined") {
+    const cloned = response.clone();
+    const data = await cloned.json().catch(() => null);
+    if (data?.error?.data?.code === "UNAUTHORIZED" || data?.[0]?.error?.data?.code === "UNAUTHORIZED") {
+      window.location.href = "/login";
+    }
+  }
+  return response;
+});
+```
+
+This ensures users are redirected to login when their session is invalidated (e.g., by logging in from another device).
+
 #### Preventative Measures
 
 1. **Single Session Policy for Banking Apps**: Financial applications should enforce one session per user for maximum security.
@@ -285,6 +364,135 @@ This ensures:
 ---
 
 ## Validation Issues
+
+### VAL-201: Email Validation Problems
+
+**Priority:** High  
+**Reporter:** James Wilson  
+**Files:** `server/routers/auth.ts`, `app/signup/page.tsx`
+
+#### What Caused the Bug
+
+The email validation had two issues:
+1. Basic regex pattern that didn't validate top-level domains
+2. Accepted any domain extension, including typos and invalid TLDs
+
+**Vulnerable Code (Backend):**
+
+```typescript
+email: z.string().email().toLowerCase(),
+```
+
+**Vulnerable Code (Frontend):**
+
+```typescript
+pattern: {
+  value: /^\S+@\S+$/i,
+  message: "Invalid email address",
+},
+```
+
+This accepted emails with invalid domains like "user@gmail.con" or "user@test.xyz123".
+
+#### How the Fix Resolves It
+
+Added validation to check for valid top-level domains (whitelist approach):
+
+**Fixed Code (Backend):**
+
+```typescript
+email: z.string()
+  .email("Invalid email address")
+  .toLowerCase()
+  .refine((email) => {
+    const validTLDs = [".com", ".org", ".net", ".edu", ".gov", ".mil", ".co", ".io", ".dev", ".app", ".me", ".info", ".biz", ".us", ".uk", ".ca", ".au", ...];
+    return validTLDs.some(tld => email.endsWith(tld));
+  }, "Please use a valid email domain (e.g., .com, .org, .edu)"),
+```
+
+**Fixed Code (Frontend):**
+
+```typescript
+validate: {
+  validTLD: (value) => {
+    const validTLDs = [".com", ".org", ".net", ".edu", ".gov", ".mil", ".co", ".io", ".dev", ".app", ".me", ".info", ".biz", ".us", ".uk", ".ca", ".au", ...];
+    const hasValidTLD = validTLDs.some(tld => value.toLowerCase().endsWith(tld));
+    return hasValidTLD || "Please use a valid email domain (e.g., .com, .org, .edu)";
+  },
+},
+```
+
+The whitelist includes common TLDs: .com, .org, .net, .edu, .gov, .mil, .co, .io, .dev, .app, .me, .info, .biz, and many country-code TLDs.
+
+#### Preventative Measures
+
+1. **Comprehensive Email Validation**: Check for common typos in addition to format validation.
+
+2. **User-Friendly Errors**: Provide helpful messages that suggest the user check for typos.
+
+3. **Consider Email Verification**: For critical applications, send a verification email to confirm the address.
+
+---
+
+### VAL-203: State Code Validation
+
+**Priority:** Medium  
+**Reporter:** Alex Thompson  
+**Files:** `server/routers/auth.ts`, `app/signup/page.tsx`
+
+#### What Caused the Bug
+
+The state validation only checked for 2 uppercase characters, without validating that it's an actual US state code:
+
+**Vulnerable Code (Backend):**
+
+```typescript
+state: z.string().length(2).toUpperCase(),
+```
+
+**Vulnerable Code (Frontend):**
+
+```typescript
+pattern: {
+  value: /^[A-Z]{2}$/,
+  message: "Use 2-letter state code",
+},
+```
+
+This accepted any 2-letter combination like "XX", "ZZ", or "AB", which are not valid US state codes.
+
+#### How the Fix Resolves It
+
+Added validation against a list of valid US state codes:
+
+**Fixed Code (Backend):**
+
+```typescript
+state: z.string().length(2).toUpperCase().refine((val) => {
+  const validStates = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR", "VI", "GU", "AS", "MP"];
+  return validStates.includes(val);
+}, "Invalid US state code"),
+```
+
+**Fixed Code (Frontend):**
+
+```typescript
+validate: {
+  validState: (value) => {
+    const validStates = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR", "VI", "GU", "AS", "MP"];
+    return validStates.includes(value.toUpperCase()) || "Invalid US state code";
+  },
+},
+```
+
+The list includes all 50 US states plus DC, Puerto Rico, Virgin Islands, Guam, American Samoa, and Northern Mariana Islands.
+
+#### Preventative Measures
+
+1. **Use Allowlists for Fixed Values**: For fields with a known set of valid values, use an allowlist rather than pattern matching.
+
+
+---
 
 ### VAL-202: Date of Birth Validation
 
@@ -671,7 +879,7 @@ password: z.string()
   .refine((val) => /\d/.test(val), "Password must contain at least one number")
   .refine((val) => /[!@#$%^&*(),.?":{}|<>]/.test(val), "Password must contain at least one special character")
   .refine((val) => {
-    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login", "abc123", "monkey", "master", "dragon", "shadow", "sunshine", "princess", "football", "baseball", "iloveyou", "trustno1", "passw0rd"];
+    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login"];
     const strippedValue = val.toLowerCase().replace(/[^a-z]/g, "");
     return !commonPatterns.some(pattern => strippedValue.includes(pattern));
   }, "Password contains a common pattern"),
@@ -682,7 +890,7 @@ password: z.string()
 ```typescript
 validate: {
   notCommon: (value) => {
-    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login", "abc123", "master"];
+    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login"];
     // Strip numbers and special chars to catch variations like "Qwerty123$"
     const strippedValue = value.toLowerCase().replace(/[^a-z]/g, "");
     const hasCommonPattern = commonPatterns.some(pattern => strippedValue.includes(pattern));
@@ -714,7 +922,7 @@ Now passwords must contain:
 
 2. **Consider Password Strength Meters**: Show users real-time feedback on password strength.
 
-3. **Block Compromised Passwords**: Consider checking passwords against databases of known leaked passwords (e.g., Have I Been Pwned API).
+3. **Block Compromised Passwords**: Consider checking passwords against databases of known leaked passwords.
 
 4. **Defense in Depth**: Always validate on both frontend (UX) and backend (security).
 
