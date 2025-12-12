@@ -227,6 +227,63 @@ To avoid similar issues in the future:
 
 ---
 
+### SEC-304: Session Management
+
+**Priority:** High  
+**Reporter:** DevOps Team  
+**File:** `server/routers/auth.ts`
+
+#### What Caused the Bug
+
+The session management had two critical issues:
+
+1. **Multiple valid sessions per user**: Each login created a new session without invalidating existing ones
+2. **No session invalidation**: Old sessions remained valid until expiry, even after new logins
+
+**Vulnerable Code (login mutation):**
+
+```typescript
+await db.insert(sessions).values({
+  userId: user.id,
+  token,
+  expiresAt: expiresAt.toISOString(),
+});
+```
+
+This allowed unlimited concurrent sessions per user. If credentials were compromised, an attacker could maintain access even after the user logged in again or "logged out" (which only deleted the current session).
+
+#### How the Fix Resolves It
+
+Implemented a **single session policy** - when a user logs in or signs up, all existing sessions are invalidated before creating a new one:
+
+**Fixed Code:**
+
+```typescript
+// Fix for SEC-304: Invalidate all existing sessions before creating new one (single session policy)
+await db.delete(sessions).where(eq(sessions.userId, user.id));
+
+await db.insert(sessions).values({
+  userId: user.id,
+  token,
+  expiresAt: expiresAt.toISOString(),
+});
+```
+
+This ensures:
+- Only one active session per user at any time
+- Logging in from a new device automatically logs out from all other devices
+- If credentials are compromised, user can regain exclusive access by logging in again
+
+#### Preventative Measures
+
+1. **Single Session Policy for Banking Apps**: Financial applications should enforce one session per user for maximum security.
+
+2. **Session Audit Logging**: Log session creation/deletion events for security monitoring.
+
+3. **Automatic Session Cleanup**: Implement a background job to clean up expired sessions from the database.
+
+---
+
 ## Validation Issues
 
 ### VAL-202: Date of Birth Validation
@@ -423,6 +480,8 @@ if (input.fundingSource.type === "card") {
 The fix also:
 - Accepts cards with 13-19 digits (supporting Visa 13-digit, Amex 15-digit, and standard 16-digit cards)
 - Validates on both frontend (immediate feedback) and backend (security)
+
+> **Note:** This fix also resolves **VAL-210: Card Type Detection**. The old code only accepted cards starting with "4" (Visa) or "5" (Mastercard), rejecting valid cards from American Express (34, 37), Discover (6011, 65), JCB, Diners Club, and others. The Luhn algorithm is card-type agnostic—it validates the mathematical checksum regardless of card network, so all valid cards are now accepted.
 
 #### Preventative Measures
 
