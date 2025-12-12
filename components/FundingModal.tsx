@@ -10,6 +10,38 @@ interface FundingModalProps {
   onSuccess: () => void;
 }
 
+// Luhn algorithm to validate credit card numbers
+function isValidCardNumber(cardNumber: string): boolean {
+  // Remove any spaces or dashes
+  const sanitized = cardNumber.replace(/[\s-]/g, "");
+  
+  // Must be all digits
+  if (!/^\d+$/.test(sanitized)) return false;
+  
+  // Most cards are 13-19 digits (Visa can be 13, Amex is 15, most are 16)
+  if (sanitized.length < 13 || sanitized.length > 19) return false;
+  
+  // Luhn algorithm
+  let sum = 0;
+  let isEven = false;
+  
+  for (let i = sanitized.length - 1; i >= 0; i--) {
+    let digit = parseInt(sanitized[i], 10);
+    
+    if (isEven) {
+      digit *= 2;
+      if (digit > 9) {
+        digit -= 9;
+      }
+    }
+    
+    sum += digit;
+    isEven = !isEven;
+  }
+  
+  return sum % 10 === 0;
+}
+
 type FundingFormData = {
   amount: string;
   fundingType: "card" | "bank";
@@ -74,13 +106,16 @@ export function FundingModal({ accountId, onClose, onSuccess }: FundingModalProp
                     value: /^\d+\.?\d{0,2}$/,
                     message: "Invalid amount format",
                   },
-                  min: {
-                    value: 0.0,
-                    message: "Amount must be at least $0.01",
-                  },
-                  max: {
-                    value: 10000,
-                    message: "Amount cannot exceed $10,000",
+                  validate: {
+                    // Fix for VAL-205: Prevent zero amount funding
+                    minAmount: (value) => {
+                      const amount = parseFloat(value);
+                      return amount >= 0.01 || "Amount must be at least $0.01";
+                    },
+                    maxAmount: (value) => {
+                      const amount = parseFloat(value);
+                      return amount <= 10000 || "Amount cannot exceed $10,000";
+                    },
                   },
                 })}
                 type="text"
@@ -113,13 +148,16 @@ export function FundingModal({ accountId, onClose, onSuccess }: FundingModalProp
               {...register("accountNumber", {
                 required: `${fundingType === "card" ? "Card" : "Account"} number is required`,
                 pattern: {
-                  value: fundingType === "card" ? /^\d{16}$/ : /^\d+$/,
-                  message: fundingType === "card" ? "Card number must be 16 digits" : "Invalid account number",
+                  value: fundingType === "card" ? /^\d{13,19}$/ : /^\d+$/,
+                  message: fundingType === "card" ? "Card number must be 13-19 digits" : "Invalid account number",
                 },
                 validate: {
                   validCard: (value) => {
                     if (fundingType !== "card") return true;
-                    return value.startsWith("4") || value.startsWith("5") || "Invalid card number";
+                    if (!isValidCardNumber(value)) {
+                      return "Invalid card number";
+                    }
+                    return true;
                   },
                 },
               })}

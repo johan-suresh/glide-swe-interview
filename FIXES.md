@@ -71,6 +71,23 @@ await db.insert(users).values({
 
 By explicitly hashing the SSN and overriding it in the insert statement, we ensure that only the hashed version is stored in the database, protecting user privacy and meeting compliance requirements.
 
+**Additional Fix - Don't return SSN in API responses (lines 77, 125):**
+
+The original code returned the user object with only the password removed:
+
+```typescript
+return { user: { ...user, password: undefined }, token };
+```
+
+This still exposed the SSN (even if hashed) in API responses. The fix removes the SSN from all API responses:
+
+```typescript
+// Fix for SEC-301: Don't return sensitive data (password, SSN) in API response
+return { user: { ...user, password: undefined, ssn: undefined }, token };
+```
+
+Sensitive data like SSN should never be returned in API responses, even when hashed.
+
 #### Preventative Measures
 
 To avoid similar issues in the future:
@@ -207,6 +224,440 @@ To avoid similar issues in the future:
 5. **Security Code Reviews**: Include XSS vulnerability checks in code review checklists, especially for any code that renders user-generated content.
 
 6. **Automated Security Scanning**: Use security scanning tools that detect potential XSS vulnerabilities in React code.
+
+---
+
+## Validation Issues
+
+### VAL-202: Date of Birth Validation
+
+**Priority:** Critical  
+**Reporter:** Maria Garcia  
+**File:** `server/routers/auth.ts` and `app/signup/page.tsx`
+
+#### What Caused the Bug
+
+The date of birth validation only checked that the value was a string, without validating:
+- The date format
+- Whether the date is in the past
+- Whether the user is at least 18 years old (required for banking)
+
+**Vulnerable Code (line 19):**
+
+```typescript
+dateOfBirth: z.string(),
+```
+
+This allowed users to enter any string, including future dates like "2025-01-01", which creates compliance issues for a banking application.
+
+#### How the Fix Resolves It
+
+The fix adds comprehensive date validation using Zod's `refine()` method:
+
+**Fixed Code:**
+
+```typescript
+// Fix for VAL-202: Validate date of birth
+dateOfBirth: z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format (YYYY-MM-DD)")
+  .refine((date) => {
+    const dob = new Date(date);
+    return !isNaN(dob.getTime());
+  }, "Invalid date")
+  .refine((date) => {
+    const dob = new Date(date);
+    return dob <= new Date();
+  }, "Date of birth cannot be in the future")
+  .refine((date) => {
+    const dob = new Date(date);
+    const today = new Date();
+    const age = today.getFullYear() - dob.getFullYear();
+    const monthDiff = today.getMonth() - dob.getMonth();
+    const dayDiff = today.getDate() - dob.getDate();
+    const actualAge = monthDiff < 0 || (monthDiff === 0 && dayDiff < 0) ? age - 1 : age;
+    return actualAge >= 18;
+  }, "You must be at least 18 years old"),
+```
+
+This ensures:
+- Date must be in YYYY-MM-DD format (HTML date input format)
+- Date must be a valid date
+- Date cannot be in the future
+- User must be at least 18 years old
+
+#### Frontend Validation
+
+In addition to server-side validation, frontend validation was added to `app/signup/page.tsx` to provide immediate feedback and prevent users from proceeding through the form with invalid dates:
+
+**Frontend Validation Code:**
+
+```typescript
+<input
+  {...register("dateOfBirth", {
+    required: "Date of birth is required",
+    validate: {
+      notFuture: (value) => {
+        const dob = new Date(value);
+        return dob <= new Date() || "Date of birth cannot be in the future";
+      },
+      isAdult: (value) => {
+        const dob = new Date(value);
+        const today = new Date();
+        const age = today.getFullYear() - dob.getFullYear();
+        const monthDiff = today.getMonth() - dob.getMonth();
+        const dayDiff = today.getDate() - dob.getDate();
+        const actualAge = monthDiff < 0 || (monthDiff === 0 && dayDiff < 0) ? age - 1 : age;
+        return actualAge >= 18 || "You must be at least 18 years old";
+      },
+    },
+  })}
+  type="date"
+/>
+```
+
+This provides:
+- Immediate validation feedback before form submission
+- Prevents users from proceeding to the next step with an invalid date of birth
+- Better user experience by catching errors early
+
+#### Preventative Measures
+
+To avoid similar issues in the future:
+
+1. **Comprehensive Input Validation**: Always validate all aspects of user input, not just format but also business rules.
+
+2. **Age Verification for Financial Apps**: Banking and financial applications must verify users are of legal age.
+
+3. **Server-Side Validation**: Never rely solely on frontend validation; always validate on the server.
+
+4. **Use Zod's refine()**: For complex validation logic, use Zod's `refine()` or `superRefine()` methods.
+
+
+---
+
+### VAL-206: Card Number Validation
+
+**Priority:** Critical  
+**Reporter:** David Brown  
+**Files:** `components/FundingModal.tsx`, `server/routers/account.ts`
+
+#### What Caused the Bug
+
+The card number validation was inadequate, only checking:
+1. That the number was exactly 16 digits
+2. That it started with "4" (Visa) or "5" (Mastercard)
+
+**Vulnerable Code:**
+
+```typescript
+pattern: {
+  value: fundingType === "card" ? /^\d{16}$/ : /^\d+$/,
+  message: fundingType === "card" ? "Card number must be 16 digits" : "Invalid account number",
+},
+validate: {
+  validCard: (value) => {
+    if (fundingType !== "card") return true;
+    return value.startsWith("4") || value.startsWith("5") || "Invalid card number";
+  },
+},
+```
+
+This accepted any 16-digit number starting with 4 or 5, such as `4000000000000000`, which is not a valid card.
+
+#### How the Fix Resolves It
+
+The fix implements the **Luhn algorithm**, which is the industry-standard checksum formula used to validate credit card numbers. This algorithm can detect:
+- Typos in card numbers
+- Randomly generated fake numbers
+- Numbers that fail the mathematical checksum
+
+**Fixed Code (Frontend - FundingModal.tsx):**
+
+```typescript
+// Luhn algorithm to validate credit card numbers
+function isValidCardNumber(cardNumber: string): boolean {
+  const sanitized = cardNumber.replace(/[\s-]/g, "");
+  if (!/^\d+$/.test(sanitized)) return false;
+  if (sanitized.length < 13 || sanitized.length > 19) return false;
+  
+  let sum = 0;
+  let isEven = false;
+  for (let i = sanitized.length - 1; i >= 0; i--) {
+    let digit = parseInt(sanitized[i], 10);
+    if (isEven) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    isEven = !isEven;
+  }
+  return sum % 10 === 0;
+}
+
+// Updated validation
+validate: {
+  validCard: (value) => {
+    if (fundingType !== "card") return true;
+    if (!isValidCardNumber(value)) {
+      return "Invalid card number";
+    }
+    return true;
+  },
+},
+```
+
+**Fixed Code (Backend - server/routers/account.ts):**
+
+```typescript
+// Server-side validation in fundAccount mutation
+if (input.fundingSource.type === "card") {
+  if (!isValidCardNumber(input.fundingSource.accountNumber)) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Invalid card number",
+    });
+  }
+}
+```
+
+The fix also:
+- Accepts cards with 13-19 digits (supporting Visa 13-digit, Amex 15-digit, and standard 16-digit cards)
+- Validates on both frontend (immediate feedback) and backend (security)
+
+#### Preventative Measures
+
+1. **Use Industry-Standard Algorithms**: For payment validation, always use established algorithms like Luhn rather than simple prefix/length checks.
+
+2. **Defense in Depth**: Validate on both frontend (UX) and backend (security).
+
+3. **Test with Known Valid/Invalid Numbers**: Use test card numbers from payment providers to verify validation logic.
+
+4. **Support Multiple Card Types**: Different card networks have different formats (Visa, Mastercard, Amex, Discover).
+
+---
+
+### VAL-205: Zero Amount Funding
+
+**Priority:** High  
+**Reporter:** Lisa Johnson  
+**File:** `components/FundingModal.tsx`
+
+#### What Caused the Bug
+
+The amount validation had two issues:
+1. The minimum value was set to `0.0` instead of `0.01`
+2. Using `min` validation on a text input compares strings, not numbers
+
+**Vulnerable Code:**
+
+```typescript
+<input
+  {...register("amount", {
+    required: "Amount is required",
+    pattern: {
+      value: /^\d+\.?\d{0,2}$/,
+      message: "Invalid amount format",
+    },
+    min: {
+      value: 0.0,
+      message: "Amount must be at least $0.01",
+    },
+    max: {
+      value: 10000,
+      message: "Amount cannot exceed $10,000",
+    },
+  })}
+  type="text"
+/>
+```
+
+This allowed users to submit $0.00 funding requests, creating unnecessary transaction records.
+
+#### How the Fix Resolves It
+
+The fix replaces `min`/`max` with custom `validate` functions that properly parse the value as a number:
+
+**Fixed Code:**
+
+```typescript
+<input
+  {...register("amount", {
+    required: "Amount is required",
+    pattern: {
+      value: /^\d+\.?\d{0,2}$/,
+      message: "Invalid amount format",
+    },
+    validate: {
+      // Fix for VAL-205: Prevent zero amount funding
+      minAmount: (value) => {
+        const amount = parseFloat(value);
+        return amount >= 0.01 || "Amount must be at least $0.01";
+      },
+      maxAmount: (value) => {
+        const amount = parseFloat(value);
+        return amount <= 10000 || "Amount cannot exceed $10,000";
+      },
+    },
+  })}
+  type="text"
+/>
+```
+
+The backend already validates with `z.number().positive()` which rejects zero and negative amounts.
+
+#### Preventative Measures
+
+1. **Use Custom Validators for Numeric Text Inputs**: React Hook Form's `min`/`max` on text inputs compare strings, not numbers.
+
+2. **Test Edge Cases**: Always test with 0, negative numbers, and boundary values.
+
+
+---
+
+### VAL-207: Routing Number Optional
+
+**Priority:** High  
+**Reporter:** Support Team  
+**File:** `server/routers/account.ts`
+
+#### What Caused the Bug
+
+The backend schema defined the routing number as optional:
+
+**Vulnerable Code:**
+
+```typescript
+fundingSource: z.object({
+  type: z.enum(["card", "bank"]),
+  accountNumber: z.string(),
+  routingNumber: z.string().optional(),  // Optional - allows bank transfers without routing number
+}),
+```
+
+While the frontend required routing numbers for bank transfers, the backend didn't enforce this, allowing malformed requests to bypass frontend validation.
+
+#### How the Fix Resolves It
+
+Updated the Zod schema to conditionally require routing numbers when the funding type is "bank":
+
+**Fixed Code:**
+
+```typescript
+fundingSource: z.object({
+  type: z.enum(["card", "bank"]),
+  accountNumber: z.string(),
+  routingNumber: z.string().optional(),
+}).refine(
+  (data) => data.type !== "bank" || (data.routingNumber && /^\d{9}$/.test(data.routingNumber)),
+  { message: "Routing number is required for bank transfers and must be 9 digits" }
+),
+```
+
+The `refine()` function validates that:
+- If type is NOT "bank", validation passes (routing number not needed for cards)
+- If type IS "bank", routing number must exist AND be exactly 9 digits
+
+#### Preventative Measures
+
+1. **Backend Must Mirror Frontend Validation**: Any required field on the frontend should also be validated on the backend.
+
+2. **Conditional Validation**: When fields are conditionally required based on other field values, ensure both frontend and backend implement the same logic.
+
+3. **Never Trust Client Input**: Backend should always validate as the source of truth, regardless of frontend validation.
+
+---
+
+### VAL-208: Weak Password Requirements
+
+**Priority:** Critical  
+**Reporter:** Security Team  
+**Files:** `server/routers/auth.ts`, `app/signup/page.tsx`
+
+#### What Caused the Bug
+
+The password validation only checked for minimum length (8 characters), without enforcing complexity requirements.
+
+**Vulnerable Code (Backend):**
+
+```typescript
+password: z.string().min(8),
+```
+
+**Vulnerable Code (Frontend):**
+
+```typescript
+validate: {
+  notCommon: (value) => {
+    const commonPasswords = ["password", "12345678", "qwerty"];
+    return !commonPasswords.includes(value.toLowerCase()) || "Password is too common";
+  },
+  hasNumber: (value) => /\d/.test(value) || "Password must contain a number",
+},
+```
+
+This allowed weak passwords like `aaaaaaaa` or `password1` which are easily guessable or vulnerable to brute-force attacks.
+
+#### How the Fix Resolves It
+
+The fix adds comprehensive password complexity requirements on both frontend and backend:
+
+**Fixed Code (Backend - server/routers/auth.ts):**
+
+```typescript
+// Fix for VAL-208: Strong password requirements
+password: z.string()
+  .min(8, "Password must be at least 8 characters")
+  .refine((val) => /[A-Z]/.test(val), "Password must contain at least one uppercase letter")
+  .refine((val) => /[a-z]/.test(val), "Password must contain at least one lowercase letter")
+  .refine((val) => /\d/.test(val), "Password must contain at least one number")
+  .refine((val) => /[!@#$%^&*(),.?":{}|<>]/.test(val), "Password must contain at least one special character")
+  .refine((val) => {
+    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login", "abc123", "monkey", "master", "dragon", "shadow", "sunshine", "princess", "football", "baseball", "iloveyou", "trustno1", "passw0rd"];
+    const strippedValue = val.toLowerCase().replace(/[^a-z]/g, "");
+    return !commonPatterns.some(pattern => strippedValue.includes(pattern));
+  }, "Password contains a common pattern"),
+```
+
+**Fixed Code (Frontend - app/signup/page.tsx):**
+
+```typescript
+validate: {
+  notCommon: (value) => {
+    const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login", "abc123", "master"];
+    // Strip numbers and special chars to catch variations like "Qwerty123$"
+    const strippedValue = value.toLowerCase().replace(/[^a-z]/g, "");
+    const hasCommonPattern = commonPatterns.some(pattern => strippedValue.includes(pattern));
+    return !hasCommonPattern || "Password contains a common pattern";
+  },
+  hasUppercase: (value) => /[A-Z]/.test(value) || "Password must contain at least one uppercase letter",
+  hasLowercase: (value) => /[a-z]/.test(value) || "Password must contain at least one lowercase letter",
+  hasNumber: (value) => /\d/.test(value) || "Password must contain at least one number",
+  hasSpecialChar: (value) => /[!@#$%^&*(),.?":{}|<>]/.test(value) || "Password must contain at least one special character",
+},
+```
+
+The common password check now:
+- Strips numbers and special characters from the input
+- Checks if the remaining letters contain any common password patterns
+- Catches variations like "Qwerty123$", "P@ssword1!", "Admin123$"
+
+Now passwords must contain:
+- At least 8 characters
+- At least one uppercase letter (A-Z)
+- At least one lowercase letter (a-z)
+- At least one number (0-9)
+- At least one special character (!@#$%^&*(),.?":{}|<>)
+- Not be a commonly used password
+
+#### Preventative Measures
+
+1. **Follow NIST Guidelines**: Modern password guidelines recommend complexity requirements and checking against known compromised passwords.
+
+2. **Consider Password Strength Meters**: Show users real-time feedback on password strength.
+
+3. **Block Compromised Passwords**: Consider checking passwords against databases of known leaked passwords (e.g., Have I Been Pwned API).
+
+4. **Defense in Depth**: Always validate on both frontend (UX) and backend (security).
 
 ---
 
@@ -600,7 +1051,7 @@ const enrichedTransactions = accountTransactions.map(transaction => ({
 ```
 
 **Performance improvement:**
-- **Before**: 1 + N database queries (1 for transactions + N for account lookups)
+- **Before**: N + 1 database queries (1 for transactions + N for account lookups)
 - **After**: 1 database query total (just for transactions)
 - Eliminates O(N) database calls, making response time constant regardless of transaction count
 

@@ -12,11 +12,41 @@ export const authRouter = router({
     .input(
       z.object({
         email: z.string().email().toLowerCase(),
-        password: z.string().min(8),
+        // Fix for VAL-208: Strong password requirements
+        password: z.string()
+          .min(8, "Password must be at least 8 characters")
+          .refine((val) => /[A-Z]/.test(val), "Password must contain at least one uppercase letter")
+          .refine((val) => /[a-z]/.test(val), "Password must contain at least one lowercase letter")
+          .refine((val) => /\d/.test(val), "Password must contain at least one number")
+          .refine((val) => /[!@#$%^&*(),.?":{}|<>]/.test(val), "Password must contain at least one special character")
+          .refine((val) => {
+            const commonPatterns = ["password", "qwerty", "123456", "letmein", "welcome", "admin", "login", "abc123", "master"];
+            const strippedValue = val.toLowerCase().replace(/[^a-z]/g, "");
+            return !commonPatterns.some(pattern => strippedValue.includes(pattern));
+          }, "Password contains a common pattern"),
         firstName: z.string().min(1),
         lastName: z.string().min(1),
         phoneNumber: z.string().regex(/^\+?\d{10,15}$/),
-        dateOfBirth: z.string(),
+        // Fix for VAL-202: Validate date of birth
+        dateOfBirth: z.string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format (YYYY-MM-DD)")
+          .refine((date) => {
+            const dob = new Date(date);
+            return !isNaN(dob.getTime());
+          }, "Invalid date")
+          .refine((date) => {
+            const dob = new Date(date);
+            return dob <= new Date();
+          }, "Date of birth cannot be in the future")
+          .refine((date) => {
+            const dob = new Date(date);
+            const today = new Date();
+            const age = today.getFullYear() - dob.getFullYear();
+            const monthDiff = today.getMonth() - dob.getMonth();
+            const dayDiff = today.getDate() - dob.getDate();
+            const actualAge = monthDiff < 0 || (monthDiff === 0 && dayDiff < 0) ? age - 1 : age;
+            return actualAge >= 18;
+          }, "You must be at least 18 years old"),
         ssn: z.string().regex(/^\d{9}$/),
         address: z.string().min(1),
         city: z.string().min(1),
@@ -74,7 +104,8 @@ export const authRouter = router({
         (ctx.res as Headers).set("Set-Cookie", `session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`);
       }
 
-      return { user: { ...user, password: undefined }, token };
+      // Fix for SEC-301: Don't return sensitive data (password, SSN) in API response
+      return { user: { ...user, password: undefined, ssn: undefined }, token };
     }),
 
   login: publicProcedure
@@ -122,7 +153,8 @@ export const authRouter = router({
         (ctx.res as Headers).set("Set-Cookie", `session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`);
       }
 
-      return { user: { ...user, password: undefined }, token };
+      // Fix for SEC-301: Don't return sensitive data (password, SSN) in API response
+      return { user: { ...user, password: undefined, ssn: undefined }, token };
     }),
 
   logout: publicProcedure.mutation(async ({ ctx }) => {
