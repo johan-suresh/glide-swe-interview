@@ -35,10 +35,12 @@ export const authRouter = router({
       }
 
       const hashedPassword = await bcrypt.hash(input.password, 10);
+      const hashedSSN = await bcrypt.hash(input.ssn, 10); //Fix for SEC-301
 
       await db.insert(users).values({
         ...input,
         password: hashedPassword,
+        ssn: hashedSSN, //storing hashed and saltedSSN in the database instead of plain text 
       });
 
       // Fetch the created user
